@@ -95,7 +95,20 @@ const fzLocal = {
                 result.light_indicator_level = msg.data.currentLevel;
             }
         },
-    } satisfies Fz.Converter,
+    } satisfies Fz.Converter<"genLevelCtrl", undefined, ["attributeReport", "readResponse"]>,
+    on_off_clear_electricity: {
+        cluster: "genOnOff",
+        type: ["attributeReport", "readResponse"],
+        options: [exposes.options.state_action()],
+        convert: (model, msg, publish, options, meta) => {
+            // https://github.com/Koenkk/zigbee2mqtt/issues/28470
+            let result = fz.on_off.convert(model, msg, publish, options, meta);
+            if (msg.data.onOff === 0) {
+                result = {...result, power: 0, current: 0};
+            }
+            return result;
+        },
+    } satisfies Fz.Converter<"genOnOff", undefined, ["attributeReport", "readResponse"]>,
 };
 
 const tzLocal = {
@@ -205,7 +218,6 @@ const sonoffExtend = {
 
         if (entityCategory) exposes = exposes.withCategory(entityCategory);
 
-        const fromZigbee: Fz.Converter[] = [];
         const toZigbee: Tz.Converter[] = [
             {
                 key: ["inching_control_set"],
@@ -255,7 +267,7 @@ const sonoffExtend = {
         ];
         return {
             exposes: [exposes],
-            fromZigbee,
+            fromZigbee: [],
             toZigbee,
             isModernExtend: true,
         };
@@ -278,7 +290,7 @@ const sonoffExtend = {
             .withFeature(e.text("friday", ea.STATE_SET))
             .withFeature(e.text("saturday", ea.STATE_SET));
 
-        const fromZigbee: Fz.Converter[] = [
+        const fromZigbee = [
             {
                 cluster: "hvacThermostat",
                 type: ["commandGetWeeklyScheduleRsp"],
@@ -286,7 +298,8 @@ const sonoffExtend = {
                     const day = Object.entries(constants.thermostatDayOfWeek).find((d) => msg.data.dayofweek & (1 << +d[0]))[1];
 
                     const transitions = msg.data.transitions
-                        .map((t: {heatSetpoint: number; transitionTime: number}) => {
+                        // TODO: heatSetpoint is optional, that possibly affects the return
+                        .map((t: {heatSetpoint?: number; transitionTime: number}) => {
                             const totalMinutes = t.transitionTime;
                             const hours = totalMinutes / 60;
                             const rHours = Math.floor(hours);
@@ -307,7 +320,7 @@ const sonoffExtend = {
                         },
                     };
                 },
-            },
+            } satisfies Fz.Converter<"hvacThermostat", undefined, ["commandGetWeeklyScheduleRsp"]>,
         ];
 
         const toZigbee: Tz.Converter[] = [
@@ -415,7 +428,7 @@ const sonoffExtend = {
                     .withValueMin(0)
                     .withValueMax(86400),
             );
-        const fromZigbee: Fz.Converter[] = [
+        const fromZigbee = [
             {
                 cluster: "customClusterEwelink",
                 type: ["attributeReport", "readResponse"],
@@ -424,20 +437,30 @@ const sonoffExtend = {
                     if (attributeKey in msg.data) {
                         // logger.debug(` from zigbee 0x5008 cluster ${msg.data[attributeKey]} `, NS);
                         // logger.debug(msg.data[attributeKey]);
-                        const buffer = Buffer.from(msg.data[attributeKey]);
-                        // logger.debug(`buffer====> ${buffer[0]} ${buffer[1]} ${buffer[2]} ${buffer[3]} ${buffer[4]} ${buffer[5]} `, NS);
-                        // logger.debug(`buffer====> ${buffer[6]} ${buffer[7]} ${buffer[8]} ${buffer[9]} `, NS);
-                        const currentCountBuffer = buffer[0];
-                        const totalNumberBuffer = buffer[1];
 
-                        const irrigationDurationBuffer = (buffer[2] << 24) | (buffer[3] << 16) | (buffer[4] << 8) | buffer[5];
+                        //logger.debug(`meta.rawData details:`, NS);
+                        //logger.debug(`  - Hex: ${msg.meta.rawData.toString('hex')}`, NS);
+                        const rawData = msg.meta.rawData;
 
-                        const irrigationIntervalBuffer = (buffer[6] << 24) | (buffer[7] << 16) | (buffer[8] << 8) | buffer[9];
+                        /*eg：raw data: 082b0a0850420a0101000000ef00000064*/
+                        /*zcl frame: 082b0a  attrid: 0850  data type :42   data payload:0a0101000000ef00000064*/
+                        /*0a:data len 01:currentCount 01:totalNumber 00 00 00 ef:irrigationDurationBuffer 00 00 00 64:irrigationIntervalBuffer*/
+                        const dataStartIndex = 7; /*data payload start index*/
 
-                        // logger.debug(`currentCountBuffer ${currentCountBuffer}`, NS);
-                        // logger.debug(`totalNumberOfTimesBuffer ${totalNumberBuffer}`, NS);
-                        // logger.debug(`irrigationDurationBuffer ${irrigationDurationBuffer}`, NS);
-                        // logger.debug(`irrigationIntervalBuffer ${irrigationIntervalBuffer}`, NS);
+                        //logger.debug(`rawData====> ${rawData[0+dataStartIndex]} ${rawData[1+dataStartIndex]} ${rawData[2+dataStartIndex]} ${rawData[3+dataStartIndex]} ${rawData[4+dataStartIndex]} ${rawData[5+dataStartIndex]} `, NS);
+                        //logger.debug(`rawData====> ${rawData[6+dataStartIndex]} ${rawData[7+dataStartIndex]} ${rawData[8+dataStartIndex]} ${rawData[9+dataStartIndex]} `, NS);
+
+                        const currentCountBuffer = rawData.readUInt8(0 + dataStartIndex);
+                        const totalNumberBuffer = rawData.readUInt8(1 + dataStartIndex);
+
+                        const irrigationDurationBuffer = rawData.readUInt32BE(2 + dataStartIndex);
+
+                        const irrigationIntervalBuffer = rawData.readUInt32BE(6 + dataStartIndex);
+
+                        //logger.debug(`currentCountBuffer ${currentCountBuffer}`, NS);
+                        //logger.debug(`totalNumberOfTimesBuffer ${totalNumberBuffer}`, NS);
+                        //logger.debug(`irrigationDurationBuffer ${irrigationDurationBuffer}`, NS);
+                        //logger.debug(`irrigationIntervalBuffer ${irrigationIntervalBuffer}`, NS);
 
                         return {
                             cyclic_timed_irrigation: {
@@ -449,7 +472,7 @@ const sonoffExtend = {
                         };
                     }
                 },
-            },
+            } satisfies Fz.Converter<"customClusterEwelink", undefined, ["attributeReport", "readResponse"]>,
         ];
         const toZigbee: Tz.Converter[] = [
             {
@@ -527,7 +550,7 @@ const sonoffExtend = {
                     .withValueMin(0)
                     .withValueMax(86400),
             );
-        const fromZigbee: Fz.Converter[] = [
+        const fromZigbee = [
             {
                 cluster: "customClusterEwelink",
                 type: ["attributeReport", "readResponse"],
@@ -536,20 +559,26 @@ const sonoffExtend = {
                     if (attributeKey in msg.data) {
                         // logger.debug(` from zigbee 0x5009 cluster ${msg.data[attributeKey]} `, NS);
                         // logger.debug(msg.data[attributeKey]);
-                        const buffer = Buffer.from(msg.data[attributeKey]);
-                        // logger.debug(`buffer====> ${buffer[0]} ${buffer[1]} ${buffer[2]} ${buffer[3]} ${buffer[4]} ${buffer[5]} `, NS);
-                        // logger.debug(`buffer====> ${buffer[6]} ${buffer[7]} ${buffer[8]} ${buffer[9]} `, NS);
-                        const currentCountBuffer = buffer[0];
-                        const totalNumberBuffer = buffer[1];
+                        const rawData = msg.meta.rawData;
 
-                        const irrigationCapacityBuffer = (buffer[2] << 24) | (buffer[3] << 16) | (buffer[4] << 8) | buffer[5];
+                        /*eg：raw data: 082b0a0850420a0101000000ef00000064*/
+                        /*zcl frame: 082b0a  attrid: 0850  data type :42   data payload:0a0101000000ef00000064*/
+                        /*0a:data len 01:currentCount 01:totalNumber 00 00 00 ef:irrigationCapacityBuffer 00 00 00 64:irrigationIntervalBuffer*/
+                        const dataStartIndex = 7; /*data payload start index*/
 
-                        const irrigationIntervalBuffer = (buffer[6] << 24) | (buffer[7] << 16) | (buffer[8] << 8) | buffer[9];
+                        //logger.debug(`rawData====> ${rawData[0+dataStartIndex]} ${rawData[1+dataStartIndex]} ${rawData[2+dataStartIndex]} ${rawData[3+dataStartIndex]} ${rawData[4+dataStartIndex]} ${rawData[5+dataStartIndex]} `, NS);
+                        //logger.debug(`rawData====> ${rawData[6+dataStartIndex]} ${rawData[7+dataStartIndex]} ${rawData[8+dataStartIndex]} ${rawData[9+dataStartIndex]} `, NS);
+                        const currentCountBuffer = rawData.readUInt8(0 + dataStartIndex);
+                        const totalNumberBuffer = rawData.readUInt8(1 + dataStartIndex);
 
-                        // logger.debug(`currentCountBuffer ${currentCountBuffer}`, NS);
-                        // logger.debug(`totalNumberBuffer ${totalNumberBuffer}`, NS);
-                        // logger.debug(`irrigationCapacityBuffer ${irrigationCapacityBuffer}`, NS);
-                        // logger.debug(`irrigationIntervalBuffer ${irrigationIntervalBuffer}`, NS);
+                        const irrigationCapacityBuffer = rawData.readUInt32BE(2 + dataStartIndex);
+
+                        const irrigationIntervalBuffer = rawData.readUInt32BE(6 + dataStartIndex);
+
+                        //logger.debug(`currentCountBuffer ${currentCountBuffer}`, NS);
+                        //logger.debug(`totalNumberBuffer ${totalNumberBuffer}`, NS);
+                        //logger.debug(`irrigationCapacityBuffer ${irrigationCapacityBuffer}`, NS);
+                        //logger.debug(`irrigationIntervalBuffer ${irrigationIntervalBuffer}`, NS);
 
                         return {
                             cyclic_quantitative_irrigation: {
@@ -561,7 +590,7 @@ const sonoffExtend = {
                         };
                     }
                 },
-            },
+            } satisfies Fz.Converter<"customClusterEwelink", undefined, ["attributeReport", "readResponse"]>,
         ];
         const toZigbee: Tz.Converter[] = [
             {
@@ -623,7 +652,7 @@ const sonoffExtend = {
             );
         if (entityCategory) exposes = exposes.withCategory(entityCategory);
 
-        const fromZigbee: Fz.Converter[] = [
+        const fromZigbee = [
             {
                 cluster: clusterName,
                 type: ["attributeReport", "readResponse"],
@@ -642,7 +671,7 @@ const sonoffExtend = {
                         return {external_trigger_mode: switchType};
                     }
                 },
-            },
+            } satisfies Fz.Converter<typeof clusterName, SonoffEwelink, ["attributeReport", "readResponse"]>,
         ];
         const toZigbee: Tz.Converter[] = [
             {
@@ -701,7 +730,7 @@ const sonoffExtend = {
                 .withFeature(e.binary("detach_relay_outlet3", ea.SET, "ENABLE", "DISABLE").withDescription("Enable/disable detach relay."));
         }
 
-        const fromZigbee: Fz.Converter[] = [
+        const fromZigbee = [
             {
                 cluster: clusterName,
                 type: ["attributeReport", "readResponse"],
@@ -728,7 +757,7 @@ const sonoffExtend = {
                         return {detach_relay_mode: datachRelayStatus};
                     }
                 },
-            },
+            } satisfies Fz.Converter<typeof clusterName, SonoffEwelink, ["attributeReport", "readResponse"]>,
         ];
         const toZigbee: Tz.Converter[] = [
             {
@@ -850,7 +879,7 @@ const sonoffExtend = {
                     .withValueMax(currentMaxLimit)
                     .withValueStep(0.1),
             );
-        const fromZigbee: Fz.Converter[] = [
+        const fromZigbee = [
             {
                 cluster: "customClusterEwelink",
                 type: ["attributeReport", "readResponse"],
@@ -971,7 +1000,7 @@ const sonoffExtend = {
                         };
                     }
                 },
-            },
+            } satisfies Fz.Converter<"customClusterEwelink", undefined, ["attributeReport", "readResponse"]>,
         ];
         const toZigbee: Tz.Converter[] = [
             {
@@ -1987,6 +2016,7 @@ export const definitions: DefinitionWithExtend[] = [
         vendor: "SONOFF",
         description: "Zigbee smart plug",
         whiteLabel: [{vendor: "SONOFF", model: "S60ZBTPG", fingerprint: [{modelID: "S60ZBTPG"}]}],
+        fromZigbee: [fzLocal.on_off_clear_electricity],
         extend: [
             m.onOff({
                 powerOnBehavior: true,

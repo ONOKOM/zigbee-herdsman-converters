@@ -3734,6 +3734,36 @@ export const definitions: DefinitionWithExtend[] = [
         ],
     },
     {
+        zigbeeModel: ["lumi.remote.acn008"],
+        model: "WXKG21LM",
+        vendor: "Aqara",
+        description: "Wireless remote switch H1M (single rocker)",
+        fromZigbee: [fz.battery, lumi.fromZigbee.lumi_action_multistate, lumi.fromZigbee.lumi_specific],
+        toZigbee: [lumi.toZigbee.lumi_switch_click_mode],
+        meta: {battery: {voltageToPercentage: {min: 2850, max: 3000}}},
+        extend: [m.quirkCheckinInterval("1_HOUR")],
+        exposes: [
+            e.battery(),
+            e.battery_voltage(),
+            e.action(["single", "double", "hold"]),
+            e
+                .enum("click_mode", ea.ALL, ["fast", "multi"])
+                .withDescription(
+                    "Click mode, fast: only supports single click which will be send immediately after clicking." +
+                        "multi: supports more events like double and hold",
+                ),
+        ],
+        configure: async (device, coordinatorEndpoint) => {
+            const endpoint1 = device.getEndpoint(1);
+            // set "event" mode
+            await endpoint1.write("manuSpecificLumi", {mode: 1}, {manufacturerCode: lumi.manufacturerCode});
+            // turn on the "multiple clicks" mode, otherwise the only "single click" events.
+            // if value is 1 - there will be single clicks, 2 - multiple.
+            await endpoint1.write("manuSpecificLumi", {293: {value: 0x02, type: 0x20}}, {manufacturerCode: lumi.manufacturerCode});
+            await reporting.bind(endpoint1, coordinatorEndpoint, ["genOnOff", "genPowerCfg"]);
+        },
+    },
+    {
         zigbeeModel: ["lumi.remote.acn009"],
         model: "WXKG22LM",
         vendor: "Aqara",
@@ -4387,7 +4417,7 @@ export const definitions: DefinitionWithExtend[] = [
         ],
     },
     {
-        zigbeeModel: ["lumi.light.agl003", "lumi.light.agl005", "lumi.light.agl006", "lumi.light.agl001"],
+        zigbeeModel: ["lumi.light.agl003", "lumi.light.agl005", "lumi.light.agl006", "lumi.light.agl001", "lumi.light.agl002"],
         model: "T2_E27",
         vendor: "Aqara",
         description: "E27 led bulb",
@@ -4398,9 +4428,21 @@ export const definitions: DefinitionWithExtend[] = [
                 description: "GU10 led bulb",
                 fingerprint: [{modelID: "lumi.light.agl005"}, {modelID: "lumi.light.agl006"}],
             },
-            {model: "T2_E26", vendor: "Aqara", description: "GU10 led bulb", fingerprint: [{modelID: "lumi.light.agl001"}]},
+            {
+                model: "T2_E26",
+                vendor: "Aqara",
+                description: "E26 led bulb",
+                fingerprint: [{modelID: "lumi.light.agl001"}, {modelID: "lumi.light.agl002"}],
+            },
         ],
         extend: [lumiLight({colorTemp: true, color: true, colorTempRange: [111, 500], powerOutageMemory: "light"}), lumiZigbeeOTA()],
+    },
+    {
+        zigbeeModel: ["lumi.light.agl004"],
+        model: "T2_E27_CCT",
+        vendor: "Aqara",
+        description: "E27 led bulb",
+        extend: [lumiLight({colorTemp: true, colorTempRange: [111, 500], powerOutageMemory: "light"}), lumiZigbeeOTA()],
     },
     {
         zigbeeModel: ["lumi.switch.agl010"],
