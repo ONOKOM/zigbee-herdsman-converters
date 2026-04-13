@@ -20,6 +20,7 @@ const manufacturerOptions = {manufacturerCode: Zcl.ManufacturerCode.CUSTOM_PEREN
 const perenioExtend = {
     addCustomClusterPerenio: () =>
         m.deviceAddCustomCluster("perenioSpecific", {
+            name: "perenioSpecific",
             ID: 64635,
             manufacturerCode: Zcl.ManufacturerCode.CUSTOM_PERENIO,
             attributes: {},
@@ -230,10 +231,10 @@ const tzPerenio = {
                 const offWaitTime = meta.message.off_wait_time != null ? meta.message.off_wait_time : 0;
 
                 if (typeof onTime !== "number") {
-                    throw Error("The on_time value must be a number!");
+                    throw new Error("The on_time value must be a number!");
                 }
                 if (typeof offWaitTime !== "number") {
-                    throw Error("The off_wait_time value must be a number!");
+                    throw new Error("The off_wait_time value must be a number!");
                 }
 
                 const payload = {ctrlbits: 0, ontime: Math.round(onTime * 10), offwaittime: Math.round(offWaitTime * 10)};
@@ -259,7 +260,7 @@ export const definitions: DefinitionWithExtend[] = [
         model: "PECLS01",
         vendor: "Perenio",
         description: "Flood alarm device",
-        fromZigbee: [fz.ias_water_leak_alarm_1, fz.ignore_basic_report, fz.battery],
+        fromZigbee: [fz.ias_water_leak_alarm_1, fz.battery],
         toZigbee: [],
         configure: async (device, coordinatorEndpoint) => {
             const endpoint = device.getEndpoint(1);
@@ -274,7 +275,7 @@ export const definitions: DefinitionWithExtend[] = [
         model: "PECWS01",
         vendor: "Perenio",
         description: "Door sensor",
-        fromZigbee: [fz.ias_contact_alarm_1, fz.battery, fz.ignore_basic_report, fz.ias_contact_alarm_1_report],
+        fromZigbee: [fz.ias_contact_alarm_1, fz.battery, fz.ias_contact_alarm_1_report],
         toZigbee: [],
         exposes: [e.contact(), e.battery(), e.battery_voltage()],
         configure: async (device, coordinatorEndpoint) => {
@@ -411,7 +412,7 @@ export const definitions: DefinitionWithExtend[] = [
             e.enum("default_on_off_state", ea.ALL, defaultOnOffStateValues),
             e.numeric("rms_voltage", ea.STATE).withUnit("V").withDescription("RMS voltage"),
             e.numeric("active_power", ea.STATE).withUnit("W").withDescription("Active power"),
-            e.numeric("consumed_energy", ea.STATE).withUnit("W*h").withDescription("Consumed energy"),
+            e.numeric("consumed_energy", ea.STATE).withUnit("Wh").withDescription("Consumed energy"),
             e
                 .binary("alarm_voltage_min", ea.ALL, true, false)
                 .withDescription("Indicates if the alarm is triggered on the voltage drop below the limit, allows to reset alarms"),

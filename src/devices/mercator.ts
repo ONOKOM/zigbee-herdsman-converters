@@ -31,7 +31,7 @@ export const definitions: DefinitionWithExtend[] = [
         model: "SMA02P",
         vendor: "Mercator Ikuü",
         description: "Motion detector",
-        fromZigbee: [fz.ias_occupancy_alarm_1, fz.battery, fz.ignore_basic_report, fz.ias_occupancy_alarm_1_report],
+        fromZigbee: [fz.ias_occupancy_alarm_1, fz.battery, fz.ias_occupancy_alarm_1_report],
         toZigbee: [],
         exposes: [e.occupancy(), e.battery_low(), e.tamper(), e.battery(), e.battery_voltage()],
         configure: async (device, coordinatorEndpoint) => {
@@ -59,7 +59,7 @@ export const definitions: DefinitionWithExtend[] = [
         model: "SMA04P",
         vendor: "Mercator Ikuü",
         description: "Contact sensor",
-        fromZigbee: [fz.ias_contact_alarm_1, fz.battery, fz.ignore_basic_report, fz.ias_contact_alarm_1_report],
+        fromZigbee: [fz.ias_contact_alarm_1, fz.battery, fz.ias_contact_alarm_1_report],
         toZigbee: [],
         exposes: [e.contact(), e.battery_low(), e.tamper(), e.battery(), e.battery_voltage()],
         configure: async (device, coordinatorEndpoint) => {
@@ -72,13 +72,6 @@ export const definitions: DefinitionWithExtend[] = [
                 /* Fails for some*/
             }
         },
-    },
-    {
-        fingerprint: tuya.fingerprint("TS0502B", ["_TZ3000_6dwfra5l"]),
-        model: "SMCL01-ZB",
-        vendor: "Mercator Ikuü",
-        description: "Ikon ceiling light",
-        extend: [tuya.modernExtend.tuyaLight({colorTemp: {range: [153, 500]}})],
     },
     {
         fingerprint: tuya.fingerprint("TS0505B", ["_TZ3000_xr5m6kfg"]),

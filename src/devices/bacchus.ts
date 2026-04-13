@@ -4,7 +4,7 @@ import {access as ea} from "../lib/exposes";
 import * as m from "../lib/modernExtend";
 import * as reporting from "../lib/reporting";
 import type {Configure, DefinitionWithExtend, Fz, ModernExtend, Tz} from "../lib/types";
-import {assertNumber, getEndpointName, isString, precisionRound, validateValue} from "../lib/utils";
+import {assertNumber, determineEndpoint, getEndpointName, isString, precisionRound, validateValue} from "../lib/utils";
 
 const defaultReporting = {min: 0, max: 3600, change: 0};
 const electicityReporting = {min: 0, max: 30, change: 1};
@@ -49,14 +49,14 @@ function timeHHMM(args: m.TextArgs<"genTime">): ModernExtend {
                           const payload: TPartialClusterAttributes<"genTime"> | RawClusterAttributes = isString(attribute)
                               ? {[attribute]: value_str}
                               : {[attribute.ID]: {value: value_str, type: attribute.type}};
-                          await m.determineEndpoint(entity, meta, cluster).write(cluster, payload, zigbeeCommandOptions);
+                          await determineEndpoint(entity, meta, cluster).write(cluster, payload, zigbeeCommandOptions);
                           return {state: {[key]: value}};
                       }
                     : undefined,
             convertGet:
                 access & ea.GET
                     ? async (entity, key, meta) => {
-                          await m.determineEndpoint(entity, meta, cluster).read(cluster, [attributeKey], zigbeeCommandOptions);
+                          await determineEndpoint(entity, meta, cluster).read(cluster, [attributeKey], zigbeeCommandOptions);
                       }
                     : undefined,
         },
@@ -82,17 +82,15 @@ function binaryWithOnOffCommand(args: m.BinaryArgs<"genOnOff", undefined>): Mode
                     ? async (entity, key, value, meta) => {
                           const state = isString(meta.message[key]) ? meta.message[key].toLowerCase() : null;
                           validateValue(state, ["toggle", "off", "on"]);
-                          await m
-                              .determineEndpoint(entity, meta, cluster)
-                              .command(cluster, state as "toggle" | "off" | "on", {}, zigbeeCommandOptions);
-                          await m.determineEndpoint(entity, meta, cluster).read(cluster, [attributeKey], zigbeeCommandOptions);
+                          await determineEndpoint(entity, meta, cluster).command(cluster, state as "toggle" | "off" | "on", {}, zigbeeCommandOptions);
+                          await determineEndpoint(entity, meta, cluster).read(cluster, [attributeKey], zigbeeCommandOptions);
                           return {state: {[key]: value}};
                       }
                     : undefined,
             convertGet:
                 access & ea.GET
                     ? async (entity, key, meta) => {
-                          await m.determineEndpoint(entity, meta, cluster).read(cluster, [attributeKey], zigbeeCommandOptions);
+                          await determineEndpoint(entity, meta, cluster).read(cluster, [attributeKey], zigbeeCommandOptions);
                       }
                     : undefined,
         },
@@ -149,14 +147,14 @@ function energy(args: m.NumericArgs<"seMetering">): ModernExtend {
                           const payload: TPartialClusterAttributes<"genTime"> | RawClusterAttributes = isString(attribute)
                               ? {[attribute]: payloadValue}
                               : {[attribute.ID]: {value: payloadValue, type: attribute.type}};
-                          await m.determineEndpoint(entity, meta, cluster).write(cluster, payload, zigbeeCommandOptions);
+                          await determineEndpoint(entity, meta, cluster).write(cluster, payload, zigbeeCommandOptions);
                           return {state: {[key]: value}};
                       }
                     : undefined,
             convertGet:
                 access & ea.GET
                     ? async (entity, key, meta) => {
-                          await m.determineEndpoint(entity, meta, cluster).read(cluster, [attributeKey], zigbeeCommandOptions);
+                          await determineEndpoint(entity, meta, cluster).read(cluster, [attributeKey], zigbeeCommandOptions);
                       }
                     : undefined,
         },
@@ -751,6 +749,81 @@ export const definitions: DefinitionWithExtend[] = [
         ],
         configure: async (device, coordinatorEndpoint) => {
             await device.getEndpoint(1).read("msSoilMoisture", [0x0202, 0x0203]);
+        },
+    },
+    {
+        zigbeeModel: ["Flower_Sensor_v4"],
+        model: "Flower_Sensor_v4",
+        vendor: "Bacchus",
+        description: "Flower soil moisture sensor",
+        extend: [
+            m.soilMoisture({
+                access: "STATE",
+                reporting: defaultReporting,
+            }),
+            m.temperature({
+                access: "STATE",
+                reporting: defaultReporting,
+            }),
+            m.illuminance({
+                access: "STATE",
+                reporting: defaultReporting,
+            }),
+            m.numeric({
+                name: "report_delay",
+                unit: "min",
+                valueMin: 1,
+                valueMax: 600,
+                cluster: "msSoilMoisture",
+                attribute: {ID: 0x0203, type: 0x21},
+                description: "Reporting interval",
+                access: "ALL",
+            }),
+            m.numeric({
+                name: "threshold",
+                unit: "%",
+                valueMin: 0,
+                valueMax: 100,
+                cluster: "msSoilMoisture",
+                attribute: {ID: 0x0202, type: 0x21},
+                description: "Reporting interval",
+                access: "ALL",
+            }),
+            m.enumLookup({
+                name: "tx_radio_power",
+                lookup: {"10dbm": 10, "19dbm": 19},
+                cluster: "genPowerCfg",
+                attribute: {ID: 0x0204, type: 0x28},
+                description: "Set TX Radio Power, dbm",
+                access: "STATE_SET",
+            }),
+            m.binary({
+                name: "smart_sleep",
+                valueOn: ["ON", 1],
+                valueOff: ["OFF", 0],
+                cluster: "genPowerCfg",
+                attribute: {ID: 0x0205, type: 0x10},
+                description: "Enable Smart Sleep, short wakeup every 6 seconds",
+                access: "STATE_SET",
+            }),
+            m.binary({
+                name: "thermal_compensation",
+                valueOn: ["ON", 1],
+                valueOff: ["OFF", 0],
+                cluster: "msSoilMoisture",
+                attribute: {ID: 0x0206, type: 0x10},
+                description: "Thermal compensation",
+                access: "STATE_SET",
+            }),
+            m.battery({
+                voltage: true,
+                voltageReportingConfig: defaultReporting,
+                percentageReportingConfig: defaultReporting,
+            }),
+        ],
+        configure: async (device, coordinatorEndpoint) => {
+            await device.getEndpoint(1).read("msSoilMoisture", [0x0202, 0x0203, 0x0206]);
+            await device.getEndpoint(1).read("genPowerCfg", [0x0204, 0x0205]);
         },
     },
     {

@@ -20,7 +20,7 @@ const fzLocal = {
         convert: (model, msg, publish, options, meta) => {
             return {action: "on"};
         },
-    } satisfies Fz.Converter<"genOnOff", undefined, "commandTuyaAction">,
+    } satisfies Fz.Converter<"genOnOff", tuya.TuyaGenOnOff, "commandTuyaAction">,
 };
 
 const valueConverterLocal = {
@@ -259,6 +259,7 @@ export const definitions: DefinitionWithExtend[] = [
         model: "HG08164",
         vendor: "Lidl",
         description: "Silvercrest smart button",
+        extend: [tuya.clusters.addTuyaGenOnOffCluster()],
         fromZigbee: [fz.command_on, fz.command_off, fz.command_step, fz.command_stop, fz.battery, tuya.fz.on_off_action],
         toZigbee: [],
         configure: async (device, coordinatorEndpoint) => {
@@ -282,7 +283,7 @@ export const definitions: DefinitionWithExtend[] = [
         model: "HG06668",
         vendor: "Lidl",
         description: "Silvercrest smart wireless door bell button",
-        fromZigbee: [fz.battery, fz.tuya_doorbell_button, fz.ignore_basic_report],
+        fromZigbee: [fz.battery, fz.tuya_doorbell_button],
         toZigbee: [],
         configure: async (device, coordinatorEndpoint) => {
             const endpoint = device.getEndpoint(1);
@@ -313,6 +314,7 @@ export const definitions: DefinitionWithExtend[] = [
         model: "FB20-002",
         vendor: "Lidl",
         description: "Livarno Lux switch and dimming light remote control",
+        extend: [tuya.clusters.addTuyaGenOnOffCluster()],
         exposes: [
             e.action(["on", "off", "brightness_stop", "brightness_step_up", "brightness_step_down", "brightness_move_up", "brightness_move_down"]),
         ],
@@ -324,6 +326,7 @@ export const definitions: DefinitionWithExtend[] = [
         model: "FB21-001",
         vendor: "Lidl",
         description: "Livarno Lux switch and dimming light remote control",
+        extend: [tuya.clusters.addTuyaGenOnOffCluster()],
         exposes: [
             e.action([
                 "on",
@@ -336,7 +339,7 @@ export const definitions: DefinitionWithExtend[] = [
                 "switch_scene",
             ]),
         ],
-        fromZigbee: [fz.command_on, fz.command_off, fz.command_step, fz.command_move, fz.command_stop, fz.tuya_switch_scene],
+        fromZigbee: [fz.command_on, fz.command_off, fz.command_step, fz.command_move, fz.command_stop, tuya.fz.switch_scene],
         toZigbee: [],
     },
     {
@@ -387,8 +390,8 @@ export const definitions: DefinitionWithExtend[] = [
         model: "PSBZS A1",
         vendor: "Lidl",
         description: "Parkside smart watering timer",
-        fromZigbee: [fz.ignore_basic_report, fz.ignore_tuya_set_time, fz.ignore_onoff_report],
-        extend: [tuya.modernExtend.tuyaBase({dp: true, forceTimeUpdates: true})],
+        fromZigbee: [fz.ignore_tuya_set_time, fz.ignore_onoff_report],
+        extend: [tuya.modernExtend.tuyaBase({dp: true, forceTimeUpdates: true, timeStart: "1970"})],
         onEvent: async (event) => {
             if (event.type === "deviceInterview" && event.data.status === "successful") {
                 // dirty hack: reset frost guard & frost alarm to get the initial state
@@ -404,7 +407,6 @@ export const definitions: DefinitionWithExtend[] = [
             }
         },
         configure: async (device, coordinatorEndpoint) => {
-            await tuya.configureMagicPacket(device, coordinatorEndpoint);
             await reporting.bind(device.getEndpoint(1), coordinatorEndpoint, ["genOnOff"]);
 
             // set reporting interval of genOnOff to max to "disable" it
@@ -564,7 +566,7 @@ export const definitions: DefinitionWithExtend[] = [
             legacy.toZigbee.zs_thermostat_away_setting,
             legacy.toZigbee.zs_thermostat_local_schedule,
         ],
-        extend: [tuya.modernExtend.tuyaBase({forceTimeUpdates: true, bindBasicOnConfigure: true})],
+        extend: [tuya.modernExtend.tuyaBase({forceTimeUpdates: true, bindBasicOnConfigure: true, timeStart: "1970"})],
         exposes: [
             e.child_lock(),
             e.comfort_temperature(),

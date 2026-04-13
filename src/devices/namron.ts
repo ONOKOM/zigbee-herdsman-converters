@@ -7,6 +7,7 @@ import * as exposes from "../lib/exposes";
 import * as m from "../lib/modernExtend";
 import * as namron from "../lib/namron";
 import * as reporting from "../lib/reporting";
+import * as store from "../lib/store";
 import * as tuya from "../lib/tuya";
 import type {DefinitionWithExtend, Fz, KeyValue, Tz} from "../lib/types";
 import * as utils from "../lib/utils";
@@ -16,6 +17,30 @@ const e = exposes.presets;
 
 const sunricherManufacturer = {manufacturerCode: Zcl.ManufacturerCode.SHENZHEN_SUNRICHER_TECHNOLOGY_LTD};
 
+interface NamronPrivate04E0 {
+    attributes: {
+        ntc2Temperature: number;
+        ntcSensorType1: number;
+        ntcSensorType2: number;
+        waterSensorValue: number;
+        ntcCalibration1: number;
+        ntcCalibration2: number;
+        waterAlarmRelayAction: number;
+        ntc1OperationSelect: number;
+        ntc2OperationSelect: number;
+        ntc1RelayAutoTemp: number;
+        ntc2RelayAutoTemp: number;
+        overrideOption: number;
+        ntc1TempHysteresis: number;
+        ntc2TempHysteresis: number;
+        waterConditionAlarm: number;
+        ntcConditionAlarm: number;
+        isExecuteCondition: number;
+    };
+    commands: never;
+    commandResponses: never;
+}
+
 const fzLocal = {
     namron_panelheater: {
         cluster: "hvacThermostat",
@@ -23,28 +48,70 @@ const fzLocal = {
         convert: (model, msg, publish, options, meta) => {
             const result: KeyValue = {};
             const data = msg.data;
+            const isPro = model.model === "4512776/4512777";
+
             if (data[0x1000] !== undefined) {
-                // OperateDisplayBrightnesss
-                result.display_brightnesss = data[0x1000];
+                // OperateDisplayBrightness
+                if (isPro) {
+                    result.display_brightness = data[0x1000];
+                } else {
+                    result.display_brightnesss = data[0x1000];
+                }
             }
             if (data[0x1001] !== undefined) {
                 // DisplayAutoOffActivation
-                const lookup = {0: "deactivated", 1: "activated"};
-                result.display_auto_off = utils.getFromLookup(data[0x1001], lookup);
+                if (isPro) {
+                    result.display_auto_off = data[0x1001] === 1;
+                } else {
+                    const lookup = {0: "deactivated", 1: "activated"};
+                    result.display_auto_off = utils.getFromLookup(data[0x1001], lookup);
+                }
             }
             if (data[0x1004] !== undefined) {
-                // PowerUpStatus
+                // PowerUpStatus (non-PRO only)
                 const lookup = {0: "manual", 1: "last_state"};
                 result.power_up_status = utils.getFromLookup(data[0x1004], lookup);
             }
             if (data[0x1009] !== undefined) {
                 // WindowOpenCheck
-                const lookup = {0: "enable", 1: "disable"};
-                result.window_open_check = utils.getFromLookup(data[0x1009], lookup);
+                if (isPro) {
+                    // PRO: 0=enable, 1=disable
+                    result.window_open_detection = data[0x1009] === 0;
+                } else {
+                    // Non-PRO: According to real life testing 0: disable, 1: enable
+                    result.window_detection = data[0x1009] === 1;
+                }
             }
             if (data[0x100a] !== undefined) {
-                // Hysterersis
-                result.hysterersis = utils.precisionRound(data[0x100a] as number, 2) / 10;
+                // Hysteresis
+                const value = utils.precisionRound(data[0x100a] as number, 2) / 10;
+                if (isPro) {
+                    result.hysteresis = value;
+                } else {
+                    result.hysterersis = value;
+                }
+            }
+            if (data[0x100b] !== undefined) {
+                // WindowOpen, 0: Window is not opened, 1: Window is opened
+                result.window_open = data[0x100b] === 1;
+            }
+            // PRO-specific attributes
+            if (data[0x2009] !== undefined) {
+                // System control method: 0=PID, 1=Hysteresis
+                result.control_method = data[0x2009] === 0 ? "pid" : "hysteresis";
+            }
+            if (data[0x100c] !== undefined) {
+                // Adaptive function AS: 0=Enable, 1=Disable
+                result.adaptive_function = data[0x100c] === 0;
+            }
+            if (data[0x2006] !== undefined) {
+                result.pid_kp = (data[0x2006] as number) / 1000.0;
+            }
+            if (data[0x2007] !== undefined) {
+                result.pid_kd = (data[0x2007] as number) / 1000.0;
+            }
+            if (data[0x2008] !== undefined) {
+                result.pid_ki = (data[0x2008] as number) / 1000.0;
             }
             return result;
         },
@@ -64,10 +131,100 @@ const fzLocal = {
         },
     } satisfies Fz.Converter<"hvacThermostat", undefined, ["attributeReport", "readResponse"]>,
 };
+// Namron Simplify 3-button remote (4512793 / 4512794)
+// -----------------------------------------------------------
+const NAMRON_SIMPLIFY_ACTIONS: Record<number, "press" | "release" | "hold"> = {
+    0: "press",
+    1: "release",
+    2: "hold",
+};
 
+const HOLD_KEY_SIMPLIFY = "namron_simplify_lastHold";
+const simplify_col = (n: number) => Math.floor((n - 1) / 2) + 1;
+const simplify_sub = (n: number) => (n % 2 === 1 ? "up" : "down");
+
+// Minimal custom-cluster shape to satisfy Fz.Converter generic constraints
+type ZosungIRCustomCluster = {
+    attributes: Record<string, never>;
+    commands: Record<string, never>;
+    commandResponses: Record<string, never>;
+};
+
+// Helper to safely parse bytes from msg without any/unknown
+function parseZosungIRBytes(msg: Fz.Message<"zosungIRControl", ZosungIRCustomCluster, ["raw"]>): number[] {
+    type RawContainer = {data?: number[]};
+    type DataShape = RawContainer | number[] | Record<string, number>;
+    const m = msg as {type?: string; data?: DataShape};
+
+    if (
+        m.type === "raw" &&
+        m.data &&
+        typeof m.data === "object" &&
+        "data" in (m.data as RawContainer) &&
+        Array.isArray((m.data as RawContainer).data)
+    ) {
+        return (m.data as RawContainer).data as number[];
+    }
+
+    if (Array.isArray(m.data)) {
+        return m.data as number[];
+    }
+
+    if (m.data && typeof m.data === "object") {
+        const obj = m.data as Record<string, number>;
+        const keys = Object.keys(obj)
+            .filter((k) => !Number.isNaN(Number(k)))
+            .sort((a, b) => Number(a) - Number(b));
+        return keys.map((k) => obj[k]);
+    }
+
+    return [];
+}
+
+const fzNamronSimplifyRemote: Fz.Converter<"zosungIRControl", ZosungIRCustomCluster, ["raw"]> = {
+    cluster: "zosungIRControl",
+    type: ["raw"],
+    convert(model, msg, publish, _options, meta) {
+        const bytes = parseZosungIRBytes(msg);
+        if (bytes.length === 0) return;
+
+        const btn = bytes.at(-2);
+        const raw = bytes.at(-1);
+        if (btn == null || raw == null) return;
+
+        const kind = NAMRON_SIMPLIFY_ACTIONS[raw as 0x00 | 0x01 | 0x02];
+        const base = `button_${simplify_col(btn)}_${simplify_sub(btn)}_`;
+
+        // Firmware sometimes sends empty action after hold: synthesize release
+        if (!kind) {
+            const lastHold = store.getValue(meta.device, HOLD_KEY_SIMPLIFY) as string | undefined;
+            if (lastHold?.endsWith("_hold")) {
+                publish({action: lastHold.replace("_hold", "_release")});
+                store.putValue(meta.device, HOLD_KEY_SIMPLIFY, null);
+            }
+            return;
+        }
+
+        if (kind === "hold") {
+            store.putValue(meta.device, HOLD_KEY_SIMPLIFY, `${base}hold`);
+            publish({action: `${base}hold`});
+            return;
+        }
+
+        if (kind === "release") {
+            publish({action: `${base}press`});
+            publish({action: `${base}release`});
+            return;
+        }
+
+        publish({action: `${base}press`});
+    },
+};
+
+// END SimplifyBryter
 const tzLocal = {
     namron_panelheater: {
-        key: ["display_brightnesss", "display_auto_off", "power_up_status", "window_open_check", "hysterersis"],
+        key: ["display_brightnesss", "display_auto_off", "power_up_status", "window_detection", "hysterersis", "window_open"],
         convertSet: async (entity, key, value, meta) => {
             if (key === "display_brightnesss") {
                 const payload = {4096: {value: value, type: Zcl.DataType.ENUM8}};
@@ -80,12 +237,11 @@ const tzLocal = {
                 const lookup = {manual: 0, last_state: 1};
                 const payload = {4100: {value: utils.getFromLookup(value, lookup), type: Zcl.DataType.ENUM8}};
                 await entity.write("hvacThermostat", payload, sunricherManufacturer);
-            } else if (key === "window_open_check") {
-                const lookup = {enable: 0, disable: 1};
-                const payload = {4105: {value: utils.getFromLookup(value, lookup), type: Zcl.DataType.ENUM8}};
+            } else if (key === "window_detection") {
+                const payload = {4105: {value: value ? 1 : 0, type: Zcl.DataType.ENUM8}};
                 await entity.write("hvacThermostat", payload, sunricherManufacturer);
             } else if (key === "hysterersis") {
-                const payload = {4106: {value: utils.toNumber(value, "hysterersis") * 10, type: 0x20}};
+                const payload = {4106: {value: utils.toNumber(value, "hysterersis") * 10, type: Zcl.DataType.UINT8}};
                 await entity.write("hvacThermostat", payload, sunricherManufacturer);
             }
         },
@@ -100,16 +256,190 @@ const tzLocal = {
                 case "power_up_status":
                     await entity.read("hvacThermostat", [0x1004], sunricherManufacturer);
                     break;
-                case "window_open_check":
+                case "window_detection":
                     await entity.read("hvacThermostat", [0x1009], sunricherManufacturer);
                     break;
                 case "hysterersis":
                     await entity.read("hvacThermostat", [0x100a], sunricherManufacturer);
                     break;
+                case "window_open":
+                    await entity.read("hvacThermostat", [0x100b], sunricherManufacturer);
+                    break;
 
                 default: // Unknown key
                     throw new Error(`Unhandled key toZigbee.namron_panelheater.convertGet ${key}`);
             }
+        },
+    } satisfies Tz.Converter,
+    namron_panelheater_pro_hysteresis: {
+        key: ["hysteresis"],
+        convertSet: async (entity, key, value, meta) => {
+            let num = utils.toNumber(value, "hysteresis");
+            if (num < 0.5) num = 0.5;
+            if (num > 5.0) num = 5.0;
+            const raw = Math.round(num * 10);
+            await entity.write("hvacThermostat", {4106: {value: raw, type: Zcl.DataType.UINT8}}, sunricherManufacturer);
+            return {state: {hysteresis: num}};
+        },
+        convertGet: async (entity, key, meta) => {
+            await entity.read("hvacThermostat", [0x100a], sunricherManufacturer);
+        },
+    } satisfies Tz.Converter,
+    namron_panelheater_pro_window_open_detection: {
+        key: ["window_open_detection"],
+        convertSet: async (entity, key, value, meta) => {
+            const enable = value === true || String(value).toUpperCase() === "ON";
+            // 0=enable, 1=disable
+            const raw = enable ? 0 : 1;
+            await entity.write("hvacThermostat", {4105: {value: raw, type: Zcl.DataType.ENUM8}}, sunricherManufacturer);
+            return {state: {window_open_detection: enable}};
+        },
+        convertGet: async (entity, key, meta) => {
+            await entity.read("hvacThermostat", [0x1009, 0x100b], sunricherManufacturer);
+        },
+    } satisfies Tz.Converter,
+    namron_panelheater_pro_display_auto_off: {
+        key: ["display_auto_off"],
+        convertSet: async (entity, key, value, meta) => {
+            const enable = value === true || String(value).toUpperCase() === "ON";
+            const raw = enable ? 1 : 0;
+            await entity.write("hvacThermostat", {4097: {value: raw, type: Zcl.DataType.ENUM8}}, sunricherManufacturer);
+            return {state: {display_auto_off: enable}};
+        },
+        convertGet: async (entity, key, meta) => {
+            await entity.read("hvacThermostat", [0x1001], sunricherManufacturer);
+        },
+    } satisfies Tz.Converter,
+    namron_panelheater_pro_control_method: {
+        key: ["control_method"],
+        convertSet: async (entity, key, value, meta) => {
+            const mode = String(value).toLowerCase();
+            let raw: number;
+            if (mode === "pid" || mode === "0") raw = 0;
+            else if (mode === "hysteresis" || mode === "1") raw = 1;
+            else return;
+            await entity.write("hvacThermostat", {8201: {value: raw, type: Zcl.DataType.ENUM8}}, sunricherManufacturer);
+            return {state: {control_method: raw === 0 ? "pid" : "hysteresis"}};
+        },
+        convertGet: async (entity, key, meta) => {
+            await entity.read("hvacThermostat", [0x2009], sunricherManufacturer);
+        },
+    } satisfies Tz.Converter,
+    namron_panelheater_pro_adaptive_function: {
+        key: ["adaptive_function"],
+        convertSet: async (entity, key, value, meta) => {
+            const enable = value === true || String(value).toUpperCase() === "ON";
+            // 0=Enable, 1=Disable
+            const raw = enable ? 0 : 1;
+            await entity.write("hvacThermostat", {4108: {value: raw, type: Zcl.DataType.ENUM8}}, sunricherManufacturer);
+            return {state: {adaptive_function: enable}};
+        },
+        convertGet: async (entity, key, meta) => {
+            await entity.read("hvacThermostat", [0x100c], sunricherManufacturer);
+        },
+    } satisfies Tz.Converter,
+    namron_panelheater_pro_pid_kp: {
+        key: ["pid_kp"],
+        convertSet: async (entity, key, value, meta) => {
+            let num = utils.toNumber(value, "pid_kp");
+            num = Math.min(Math.max(num, 0), 1);
+            await entity.write("hvacThermostat", {8198: {value: Math.round(num * 1000), type: Zcl.DataType.UINT16}}, sunricherManufacturer);
+            return {state: {pid_kp: num}};
+        },
+        convertGet: async (entity, key, meta) => {
+            await entity.read("hvacThermostat", [0x2006], sunricherManufacturer);
+        },
+    } satisfies Tz.Converter,
+    namron_panelheater_pro_pid_ki: {
+        key: ["pid_ki"],
+        convertSet: async (entity, key, value, meta) => {
+            let num = utils.toNumber(value, "pid_ki");
+            num = Math.min(Math.max(num, 0), 1);
+            await entity.write("hvacThermostat", {8200: {value: Math.round(num * 1000), type: Zcl.DataType.UINT16}}, sunricherManufacturer);
+            return {state: {pid_ki: num}};
+        },
+        convertGet: async (entity, key, meta) => {
+            await entity.read("hvacThermostat", [0x2008], sunricherManufacturer);
+        },
+    } satisfies Tz.Converter,
+    namron_panelheater_pro_pid_kd: {
+        key: ["pid_kd"],
+        convertSet: async (entity, key, value, meta) => {
+            let num = utils.toNumber(value, "pid_kd");
+            num = Math.min(Math.max(num, 0), 1);
+            await entity.write("hvacThermostat", {8199: {value: Math.round(num * 1000), type: Zcl.DataType.UINT16}}, sunricherManufacturer);
+            return {state: {pid_kd: num}};
+        },
+        convertGet: async (entity, key, meta) => {
+            await entity.read("hvacThermostat", [0x2007], sunricherManufacturer);
+        },
+    } satisfies Tz.Converter,
+    namron_panelheater_pro_state: {
+        key: ["state"],
+        convertSet: async (entity, key, value, meta) => {
+            const v = String(value).toUpperCase();
+            const isOn = v === "ON";
+            const systemMode = isOn ? 0x04 : 0x00; // 0x04=heat, 0x00=off
+            await entity.write("hvacThermostat", {systemMode}, {disableDefaultResponse: true});
+            return {state: {state: isOn ? "ON" : "OFF"}};
+        },
+        convertGet: async (entity, key, meta) => {
+            await entity.read("hvacThermostat", ["systemMode"]);
+        },
+    } satisfies Tz.Converter,
+    namron_panelheater_pro_frost_mode: {
+        key: ["frost_mode"],
+        convertSet: async (entity, key, value, meta) => {
+            const enable = value === true || String(value).toUpperCase() === "ON";
+
+            if (enable) {
+                // Save current state before enabling frost mode
+                if (meta.state) {
+                    if (meta.state._prev_system_mode === undefined && meta.state.system_mode !== undefined) {
+                        meta.state._prev_system_mode = meta.state.system_mode;
+                    }
+                    if (meta.state._prev_occupied_heating_setpoint === undefined && meta.state.occupied_heating_setpoint !== undefined) {
+                        meta.state._prev_occupied_heating_setpoint = meta.state.occupied_heating_setpoint;
+                    }
+                }
+                // Set to heat mode with 7°C setpoint (700 = 7.00°C)
+                await entity.write("hvacThermostat", {systemMode: 0x04, occupiedHeatingSetpoint: 700}, {disableDefaultResponse: true});
+            } else {
+                // Restore previous state
+                let systemMode = 0x04; // Default to heat
+                let occupiedHeatingSetpoint = 2100; // Default to 21°C
+
+                if (meta.state) {
+                    if (meta.state._prev_system_mode !== undefined) {
+                        const sm = meta.state._prev_system_mode;
+
+                        if (typeof sm === "number") {
+                            systemMode = sm;
+                        } else {
+                            const smStr = String(sm);
+                            if (smStr === "off") systemMode = 0x00;
+                            else if (smStr === "auto") systemMode = 0x01;
+                            else if (smStr === "heat") systemMode = 0x04;
+                        }
+                    }
+
+                    if (meta.state._prev_occupied_heating_setpoint !== undefined) {
+                        let sp = meta.state._prev_occupied_heating_setpoint as number;
+                        // Convert to centidegrees if needed
+                        if (typeof sp === "number" && sp < 100) {
+                            sp = Math.round(sp * 100);
+                        }
+                        occupiedHeatingSetpoint = sp;
+                    }
+
+                    delete meta.state._prev_system_mode;
+                    delete meta.state._prev_occupied_heating_setpoint;
+                }
+
+                await entity.write("hvacThermostat", {systemMode, occupiedHeatingSetpoint}, {disableDefaultResponse: true});
+            }
+
+            return {state: {frost_mode: enable}};
         },
     } satisfies Tz.Converter,
 };
@@ -138,12 +468,20 @@ export const definitions: DefinitionWithExtend[] = [
         extend: [m.light({configureReporting: true})],
     },
     {
+        zigbeeModel: ["4512739"],
+        model: "4512739",
+        vendor: "Namron",
+        description: "Zigbee dimmer TW 400W",
+        ota: true,
+        extend: [m.light({configureReporting: true, colorTemp: {range: [160, 450]}}), m.electricityMeter()],
+    },
+    {
         zigbeeModel: ["4512760"],
         model: "4512760",
         vendor: "Namron",
         description: "Zigbee dimmer 400W",
         ota: true,
-        extend: [m.light({configureReporting: true})],
+        extend: [m.light({configureReporting: true}), m.electricityMeter({voltage: false, current: false})],
     },
     {
         zigbeeModel: ["4512708"],
@@ -171,7 +509,7 @@ export const definitions: DefinitionWithExtend[] = [
     {
         zigbeeModel: ["4512789"],
         model: "4512789",
-        vendor: "Namron AS",
+        vendor: "Namron",
         description: "Zigbee smart plug 16A IP44",
         extend: [m.deviceTemperature({scale: 100}), m.onOff(), m.electricityMeter()],
     },
@@ -194,7 +532,7 @@ export const definitions: DefinitionWithExtend[] = [
         zigbeeModel: ["4512733"],
         model: "4512733",
         vendor: "Namron",
-        description: "ZigBee dimmer 2-pol 400W",
+        description: "Zigbee dimmer 2-pol 400W",
         extend: [m.light({configureReporting: true})],
     },
     {
@@ -209,7 +547,7 @@ export const definitions: DefinitionWithExtend[] = [
         zigbeeModel: ["1402755"],
         model: "1402755",
         vendor: "Namron",
-        description: "ZigBee LED dimmer",
+        description: "Zigbee LED dimmer",
         extend: [m.light({configureReporting: true})],
     },
     {
@@ -310,7 +648,7 @@ export const definitions: DefinitionWithExtend[] = [
         zigbeeModel: ["1402769"],
         model: "1402769",
         vendor: "Namron",
-        description: "ZigBee LED dimmer",
+        description: "Zigbee LED dimmer",
         extend: [m.light({configureReporting: true}), m.forcePowerSource({powerSource: "Mains (single phase)"})],
         ota: true,
     },
@@ -366,15 +704,7 @@ export const definitions: DefinitionWithExtend[] = [
         model: "4512726",
         vendor: "Namron",
         description: "Zigbee 4 in 1 dimmer",
-        fromZigbee: [
-            fz.battery,
-            fz.command_on,
-            fz.command_off,
-            fz.command_move_to_level,
-            fz.command_move_to_color_temp,
-            fz.command_move_to_hue,
-            fz.ignore_genOta,
-        ],
+        fromZigbee: [fz.battery, fz.command_on, fz.command_off, fz.command_move_to_level, fz.command_move_to_color_temp, fz.command_move_to_hue],
         toZigbee: [],
         exposes: [e.battery(), e.battery_voltage(), e.action(["on", "off", "brightness_move_to_level", "color_temperature_move", "move_to_hue"])],
         meta: {battery: {dontDividePercentage: true}},
@@ -914,9 +1244,7 @@ export const definitions: DefinitionWithExtend[] = [
                 .withLocalTemperatureCalibration(-3, 3, 0.1)
                 .withRunningState(["idle", "heat"]),
             // Namron proprietary stuff
-            e
-                .binary("child_lock", ea.ALL, "LOCK", "UNLOCK")
-                .withDescription("Enables/disables physical input on the device"),
+            e.binary("child_lock", ea.ALL, "LOCK", "UNLOCK").withDescription("Enables/disables physical input on the device"),
             e
                 .numeric("hysterersis", ea.ALL)
                 .withUnit("°C")
@@ -934,7 +1262,8 @@ export const definitions: DefinitionWithExtend[] = [
             e
                 .enum("power_up_status", ea.ALL, ["manual", "last_state"])
                 .withDescription("The mode after a power reset.  Default: Previous Mode. See instructions for information about manual"),
-            e.enum("window_open_check", ea.ALL, ["enable", "disable"]).withDescription("Turn on/off window check mode"),
+            e.window_detection_bool(),
+            e.window_open(ea.STATE_GET),
         ],
         configure: async (device, coordinatorEndpoint) => {
             const endpoint = device.getEndpoint(1);
@@ -972,7 +1301,7 @@ export const definitions: DefinitionWithExtend[] = [
                 "hvacThermostat",
                 [
                     {
-                        attribute: {ID: 0x1000, type: 0x30},
+                        attribute: {ID: 0x1000, type: Zcl.DataType.ENUM8},
                         minimumReportInterval: 0,
                         maximumReportInterval: constants.repInterval.HOUR,
                         reportableChange: null,
@@ -985,7 +1314,7 @@ export const definitions: DefinitionWithExtend[] = [
                 "hvacThermostat",
                 [
                     {
-                        attribute: {ID: 0x1001, type: 0x30},
+                        attribute: {ID: 0x1001, type: Zcl.DataType.ENUM8},
                         minimumReportInterval: 0,
                         maximumReportInterval: constants.repInterval.HOUR,
                         reportableChange: null,
@@ -998,7 +1327,7 @@ export const definitions: DefinitionWithExtend[] = [
                 "hvacThermostat",
                 [
                     {
-                        attribute: {ID: 0x1004, type: 0x30},
+                        attribute: {ID: 0x1004, type: Zcl.DataType.ENUM8},
                         minimumReportInterval: 0,
                         maximumReportInterval: constants.repInterval.HOUR,
                         reportableChange: null,
@@ -1006,12 +1335,12 @@ export const definitions: DefinitionWithExtend[] = [
                 ],
                 sunricherManufacturer,
             );
-            // window_open_check
+            // window_detection
             await endpoint.configureReporting(
                 "hvacThermostat",
                 [
                     {
-                        attribute: {ID: 0x1009, type: 0x30},
+                        attribute: {ID: 0x1009, type: Zcl.DataType.ENUM8},
                         minimumReportInterval: 0,
                         maximumReportInterval: constants.repInterval.HOUR,
                         reportableChange: null,
@@ -1032,12 +1361,140 @@ export const definitions: DefinitionWithExtend[] = [
                 ],
                 sunricherManufacturer,
             );
+            // window_open
+            await endpoint.configureReporting(
+                "hvacThermostat",
+                [
+                    {
+                        attribute: {ID: 0x100b, type: Zcl.DataType.ENUM8},
+                        minimumReportInterval: 0,
+                        maximumReportInterval: constants.repInterval.HOUR,
+                        reportableChange: null,
+                    },
+                ],
+                sunricherManufacturer,
+            );
 
             await endpoint.read("hvacThermostat", ["systemMode", "runningState", "occupiedHeatingSetpoint"]);
             await endpoint.read("hvacUserInterfaceCfg", ["keypadLockout"]);
-            await endpoint.read("hvacThermostat", [0x1000, 0x1001, 0x1004, 0x1009, 0x100a], sunricherManufacturer);
+            await endpoint.read("hvacThermostat", [0x1000, 0x1001, 0x1004, 0x1009, 0x100a, 0x100b], sunricherManufacturer);
 
             await reporting.bind(endpoint, coordinatorEndpoint, binds);
+        },
+    },
+    {
+        zigbeeModel: ["Panel Heater"],
+        model: "4512776/4512777",
+        vendor: "Namron",
+        description: "Zigbee thermostat for panel heater PRO (white 4512776 / black 4512777)",
+        extend: [
+            m.electricityMeter({cluster: "both", energy: {divisor: 10}, power: false, voltage: false, current: false, configureReporting: false}),
+        ],
+        fromZigbee: [fz.thermostat, fzLocal.namron_panelheater, fz.namron_hvac_user_interface, fz.electrical_measurement],
+        toZigbee: [
+            tz.thermostat_occupied_heating_setpoint,
+            tz.thermostat_local_temperature_calibration,
+            tz.thermostat_system_mode,
+            tz.namron_thermostat_child_lock,
+            tzLocal.namron_panelheater_pro_state,
+            tzLocal.namron_panelheater_pro_frost_mode,
+            tzLocal.namron_panelheater_pro_hysteresis,
+            tzLocal.namron_panelheater_pro_window_open_detection,
+            tzLocal.namron_panelheater_pro_display_auto_off,
+            tzLocal.namron_panelheater_pro_control_method,
+            tzLocal.namron_panelheater_pro_adaptive_function,
+            tzLocal.namron_panelheater_pro_pid_kp,
+            tzLocal.namron_panelheater_pro_pid_ki,
+            tzLocal.namron_panelheater_pro_pid_kd,
+        ],
+        exposes: [
+            e
+                .climate()
+                .withLocalTemperature()
+                .withSetpoint("occupied_heating_setpoint", 5, 35, 0.5)
+                .withLocalTemperatureCalibration(-10, 10, 0.5)
+                .withSystemMode(["off", "heat", "auto"])
+                .withRunningState(["idle", "heat"]),
+            e.binary("state", ea.ALL, "ON", "OFF").withDescription("Virtual on/off (maps to systemMode)"),
+            e
+                .binary("frost_mode", ea.ALL, true, false)
+                .withDescription("Frost protection: HEAT + 7°C, restores previous mode/setpoint when disabled"),
+            e.binary("child_lock", ea.ALL, "LOCK", "UNLOCK").withDescription("Enables/disables physical input on the device"),
+            e
+                .numeric("hysteresis", ea.ALL)
+                .withUnit("°C")
+                .withValueMin(0.5)
+                .withValueMax(5.0)
+                .withValueStep(0.1)
+                .withDescription("Hysteresis (0.5–5.0°C) for on/off control"),
+            e.binary("window_open_detection", ea.ALL, true, false).withDescription("Window open detection"),
+            e.binary("window_open", ea.STATE, true, false).withDescription("Whether the heater thinks window is open"),
+            e.enum("control_method", ea.ALL, ["pid", "hysteresis"]).withDescription("System control method (PID or hysteresis)"),
+            e.binary("adaptive_function", ea.ALL, true, false).withDescription("Adaptive preheat function (on/off)"),
+            e.numeric("pid_kp", ea.ALL).withValueMin(0).withValueMax(1).withValueStep(0.01).withDescription("PID Kp"),
+            e.numeric("pid_ki", ea.ALL).withValueMin(0).withValueMax(1).withValueStep(0.01).withDescription("PID Ki"),
+            e.numeric("pid_kd", ea.ALL).withValueMin(0).withValueMax(1).withValueStep(0.01).withDescription("PID Kd"),
+            e
+                .numeric("display_brightness", ea.STATE)
+                .withValueMin(1)
+                .withValueMax(7)
+                .withValueStep(1)
+                .withDescription("Display brightness (read-only, set on the heater)"),
+            e.binary("display_auto_off", ea.ALL, true, false).withDescription("Display auto off after 30s without interaction"),
+            e.power(),
+        ],
+        configure: async (device, coordinatorEndpoint) => {
+            const endpoint = device.getEndpoint(1);
+
+            // Save energy divisor manually since configureReporting is disabled
+            endpoint.saveClusterAttributeKeyValue("seMetering", {divisor: 10, multiplier: 1});
+            endpoint.save();
+
+            await reporting.bind(endpoint, coordinatorEndpoint, [
+                "genBasic",
+                "genIdentify",
+                "hvacThermostat",
+                "hvacUserInterfaceCfg",
+                "seMetering",
+                "haElectricalMeasurement",
+            ]);
+
+            await reporting.thermostatTemperature(endpoint, {min: 0, change: 50});
+            await reporting.thermostatOccupiedHeatingSetpoint(endpoint);
+
+            await endpoint.read("hvacThermostat", ["localTemp", "occupiedHeatingSetpoint", "systemMode"]);
+
+            // Proprietary attrs including display, window, PID, control_method, adaptive
+            try {
+                await endpoint.read(
+                    "hvacThermostat",
+                    [0x1000, 0x1001, 0x1009, 0x100a, 0x100b, 0x100c, 0x2006, 0x2007, 0x2008, 0x2009],
+                    sunricherManufacturer,
+                );
+            } catch {
+                // Ignore - some attributes may not be supported
+            }
+
+            try {
+                await endpoint.read("hvacUserInterfaceCfg", ["keypadLockout"]);
+            } catch {
+                // Ignore
+            }
+
+            try {
+                await endpoint.read("haElectricalMeasurement", ["activePower"]);
+            } catch {
+                // Ignore
+            }
+
+            try {
+                await endpoint.read("seMetering", ["currentSummDelivered"]);
+            } catch {
+                // Ignore
+            }
+
+            device.powerSource = "Mains (single phase)";
+            device.save();
         },
     },
     {
@@ -1104,10 +1561,11 @@ export const definitions: DefinitionWithExtend[] = [
         },
     },
     {
-        zigbeeModel: ["4512758"],
+        zigbeeModel: ["4512758", "4512759"],
         model: "4512758",
         vendor: "Namron",
         description: "Zigbee thermostat 16A",
+        whiteLabel: [{model: "4512759", fingerprint: [{modelID: "4512759"}]}],
         fromZigbee: [fzLocal.namron_thermostat2, fz.metering, fz.electrical_measurement, fz.namron_hvac_user_interface],
         toZigbee: [
             {
@@ -1205,9 +1663,7 @@ export const definitions: DefinitionWithExtend[] = [
                 //.withRunningMode(['off', 'cool','heat'])
                 .withRunningState(["idle", "cool", "heat"]),
             //.withPiHeatingDemand()
-            e
-                .binary("child_lock", ea.ALL, "LOCK", "UNLOCK")
-                .withDescription("Enables/disables physical input on the device"),
+            e.binary("child_lock", ea.ALL, "LOCK", "UNLOCK").withDescription("Enables/disables physical input on the device"),
         ],
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint = device.getEndpoint(1);
@@ -1488,10 +1944,11 @@ export const definitions: DefinitionWithExtend[] = [
         extend: [m.light({effect: false, configureReporting: true}), m.electricityMeter({cluster: "electrical"})],
     },
     {
-        zigbeeModel: ["4512783", "4512784"],
+        zigbeeModel: ["4512783", "4512784", "4566702"],
         model: "4512783/4512784",
         vendor: "Namron",
         description: "Namron edge thermostat",
+        whiteLabel: [{vendor: "Namron", model: "4566702", fingerprint: [{modelID: "4566702"}]}],
         fromZigbee: [
             fz.thermostat,
             namron.fromZigbee.namron_edge_thermostat_holiday_temp,
@@ -1549,10 +2006,14 @@ export const definitions: DefinitionWithExtend[] = [
                 defaultIntervalSeconds: 60 * 60 * 24,
                 poll: async (device) => {
                     const endpoint = device.getEndpoint(1);
+
+                    // Device expects LOCAL Unix time, not UTC
+                    const localTimeSeconds = Math.floor(Date.now() / 1000) - new Date().getTimezoneOffset() * 60;
+
                     // Device does not asks for the time with binding, therefore we write the time every 24 hours
                     await endpoint.write("hvacThermostat", {
                         [0x800b]: {
-                            value: Date.now() / 1000,
+                            value: localTimeSeconds,
                             type: Zcl.DataType.UINT32,
                         },
                     });
@@ -1622,6 +2083,361 @@ export const definitions: DefinitionWithExtend[] = [
             }),
             m.battery(),
             m.temperature({reporting: undefined}),
+        ],
+    },
+    {
+        zigbeeModel: ["4512792"],
+        model: "4512792",
+        vendor: "Namron",
+        description: "Simplify 1-2p relay (Zigbee / BT)",
+        extend: [
+            m.onOff(),
+            m.electricityMeter({
+                power: {multiplier: 1, divisor: 10}, // W
+                voltage: {multiplier: 1, divisor: 10}, // V -> 2383 -> 238.3
+                current: {multiplier: 1, divisor: 100}, // A
+                energy: {multiplier: 1, divisor: 100}, // kWh
+            }),
+        ],
+    },
+    {
+        zigbeeModel: ["4512793", "4512794"],
+        model: "4512793",
+        vendor: "Namron",
+        description: "Simplify 6-button remote with battery",
+        extend: [m.battery()],
+        fromZigbee: [fzNamronSimplifyRemote],
+        toZigbee: [],
+        exposes: [
+            e.action([
+                "button_1_up_press",
+                "button_1_up_hold",
+                "button_1_up_release",
+                "button_1_down_press",
+                "button_1_down_hold",
+                "button_1_down_release",
+                "button_2_up_press",
+                "button_2_up_hold",
+                "button_2_up_release",
+                "button_2_down_press",
+                "button_2_down_hold",
+                "button_2_down_release",
+                "button_3_up_press",
+                "button_3_up_hold",
+                "button_3_up_release",
+                "button_3_down_press",
+                "button_3_down_hold",
+                "button_3_down_release",
+            ]),
+        ],
+    },
+    {
+        zigbeeModel: ["4512791"],
+        model: "4512791",
+        vendor: "Namron",
+        description: "Namron Simplify Zigbee dimmer (1/2-polet / Zigbee / BT)",
+        extend: [
+            m.light({}),
+            m.electricityMeter({
+                power: {multiplier: 1, divisor: 10},
+                voltage: {multiplier: 1, divisor: 10},
+                current: {multiplier: 1, divisor: 100},
+                energy: {multiplier: 1, divisor: 100},
+            }),
+        ],
+        exposes: [
+            exposes.numeric("min_brightness", ea.ALL).withValueMin(1).withValueMax(127).withDescription("Minimum brightness (≈1–50%)"),
+            exposes.numeric("max_brightness", ea.ALL).withValueMin(127).withValueMax(254).withDescription("Maximum brightness (≈50–100%)"),
+            exposes.numeric("start_brightness", ea.ALL).withValueMin(1).withValueMax(254).withDescription("Default brightness at power-on/startup"),
+        ],
+    },
+    {
+        zigbeeModel: ["4512785"],
+        model: "4512785",
+        vendor: "Namron",
+        description: "Zigbee 30A relay with NTC temperature sensors and water leak detection",
+        extend: [
+            m.deviceAddCustomCluster("namronPrivate04E0", {
+                ID: 0x04e0,
+                name: "namronPrivate04E0",
+                attributes: {
+                    ntc2Temperature: {ID: 0x0000, name: "ntc2Temperature", type: Zcl.DataType.INT16},
+                    ntcSensorType1: {ID: 0x0001, name: "ntcSensorType1", type: Zcl.DataType.ENUM8, write: true},
+                    ntcSensorType2: {ID: 0x0002, name: "ntcSensorType2", type: Zcl.DataType.ENUM8, write: true},
+                    waterSensorValue: {ID: 0x0003, name: "waterSensorValue", type: Zcl.DataType.BOOLEAN},
+                    ntcCalibration1: {ID: 0x0004, name: "ntcCalibration1", type: Zcl.DataType.INT8, write: true},
+                    ntcCalibration2: {ID: 0x0005, name: "ntcCalibration2", type: Zcl.DataType.INT8, write: true},
+                    waterAlarmRelayAction: {ID: 0x0006, name: "waterAlarmRelayAction", type: Zcl.DataType.ENUM8, write: true},
+                    ntc1OperationSelect: {ID: 0x0007, name: "ntc1OperationSelect", type: Zcl.DataType.ENUM8, write: true},
+                    ntc2OperationSelect: {ID: 0x0008, name: "ntc2OperationSelect", type: Zcl.DataType.ENUM8, write: true},
+                    ntc1RelayAutoTemp: {ID: 0x0009, name: "ntc1RelayAutoTemp", type: Zcl.DataType.INT16, write: true},
+                    ntc2RelayAutoTemp: {ID: 0x000a, name: "ntc2RelayAutoTemp", type: Zcl.DataType.INT16, write: true},
+                    overrideOption: {ID: 0x000b, name: "overrideOption", type: Zcl.DataType.ENUM8, write: true},
+                    ntc1TempHysteresis: {ID: 0x000c, name: "ntc1TempHysteresis", type: Zcl.DataType.INT8, write: true},
+                    ntc2TempHysteresis: {ID: 0x000d, name: "ntc2TempHysteresis", type: Zcl.DataType.INT8, write: true},
+                    waterConditionAlarm: {ID: 0x000e, name: "waterConditionAlarm", type: Zcl.DataType.BOOLEAN},
+                    ntcConditionAlarm: {ID: 0x000f, name: "ntcConditionAlarm", type: Zcl.DataType.BOOLEAN},
+                    isExecuteCondition: {ID: 0x0010, name: "isExecuteCondition", type: Zcl.DataType.BOOLEAN},
+                },
+                commands: {},
+                commandsResponse: {},
+            }),
+            m.onOff({powerOnBehavior: true}),
+            m.electricityMeter({voltage: {divisor: 10}, current: {divisor: 1000}, power: {divisor: 1}, energy: {divisor: 100}}),
+            // Override genDeviceTempCfg to relax currentTemperature max constraint
+            // (device reports in 0.1°C units, e.g. 311 = 31.1°C, exceeding ZCL max of 200)
+            m.deviceAddCustomCluster("genDeviceTempCfg", {
+                ID: 0x0002,
+                name: "genDeviceTempCfg",
+                attributes: {
+                    currentTemperature: {ID: 0x0000, name: "currentTemperature", type: Zcl.DataType.INT16, min: -2000, max: 2000},
+                },
+                commands: {},
+                commandsResponse: {},
+            }),
+            // Device reports currentTemperature in 0.1°C units (non-standard; ZCL spec is °C).
+            // e.g. raw 311 = 31.1°C. change: 10 raw units = 1°C reporting threshold; fzConvert divides by 10.
+            m.numeric({
+                name: "device_temperature",
+                cluster: "genDeviceTempCfg",
+                attribute: "currentTemperature",
+                reporting: {min: 15, max: 600, change: 10},
+                description: "Internal device temperature",
+                unit: "°C",
+                access: "STATE_GET",
+                entityCategory: "diagnostic",
+                fzConvert: (model, msg) => {
+                    if (msg.data.currentTemperature !== undefined) {
+                        const raw = msg.data.currentTemperature;
+                        if (raw !== -32768 && raw !== 0x8000) {
+                            return {device_temperature: utils.precisionRound(raw, 2) / 10};
+                        }
+                    }
+                },
+            }),
+            // Device reports measuredValue in 0.01°C units (standard for msTemperatureMeasurement).
+            // e.g. raw 2250 = 22.50°C. change: 10 raw units = 0.1°C reporting threshold; fzConvert divides by 100.
+            m.numeric({
+                name: "ntc1_temperature",
+                cluster: "msTemperatureMeasurement",
+                attribute: "measuredValue",
+                reporting: {min: 15, max: 600, change: 10},
+                description: "External NTC1 temperature probe",
+                unit: "°C",
+                access: "STATE_GET",
+                fzConvert: (model, msg) => {
+                    if (msg.data.measuredValue !== undefined) {
+                        const raw = msg.data.measuredValue;
+                        if (raw !== -32768 && raw !== 0x8000) {
+                            return {ntc1_temperature: utils.precisionRound(raw, 2) / 100};
+                        }
+                    }
+                },
+            }),
+            // Device reports ntc2Temperature in 0.01°C units (same as NTC1).
+            // e.g. raw 2350 = 23.50°C. change: 10 raw units = 0.1°C reporting threshold; fzConvert divides by 100.
+            m.numeric<"namronPrivate04E0", NamronPrivate04E0>({
+                name: "ntc2_temperature",
+                cluster: "namronPrivate04E0",
+                attribute: "ntc2Temperature",
+                reporting: {min: 15, max: 600, change: 10},
+                description: "External NTC2 temperature probe",
+                unit: "°C",
+                access: "STATE_GET",
+                fzConvert: (model, msg) => {
+                    if (msg.data.ntc2Temperature !== undefined) {
+                        const raw = msg.data.ntc2Temperature;
+                        if (raw !== -32768 && raw !== 0x8000) {
+                            return {ntc2_temperature: utils.precisionRound(raw, 2) / 100};
+                        }
+                    }
+                },
+            }),
+            // Water sensor (NO contacts: shorted = water detected)
+            m.binary<"namronPrivate04E0", NamronPrivate04E0>({
+                name: "water_sensor",
+                cluster: "namronPrivate04E0",
+                attribute: "waterSensorValue",
+                description: "External water sensor (true = water detected)",
+                valueOn: [true, 1],
+                valueOff: [false, 0],
+                access: "STATE_GET",
+                reporting: {min: 1, max: 300, change: 1},
+            }),
+            // NTC sensor type configuration
+            m.enumLookup<"namronPrivate04E0", NamronPrivate04E0>({
+                name: "ntc1_sensor_type",
+                lookup: {none: 0, "NTC-10K": 1, "NTC-12K": 2, "NTC-15K": 3, "NTC-22K": 4, "NTC-33K": 5, "NTC-47K": 6},
+                cluster: "namronPrivate04E0",
+                attribute: "ntcSensorType1",
+                description: "NTC probe type for sensor #1 (must be set for temperature reporting)",
+                entityCategory: "config",
+            }),
+            m.enumLookup<"namronPrivate04E0", NamronPrivate04E0>({
+                name: "ntc2_sensor_type",
+                lookup: {none: 0, "NTC-10K": 1, "NTC-12K": 2, "NTC-15K": 3, "NTC-22K": 4, "NTC-33K": 5, "NTC-47K": 6},
+                cluster: "namronPrivate04E0",
+                attribute: "ntcSensorType2",
+                description: "NTC probe type for sensor #2 (must be set for temperature reporting)",
+                entityCategory: "config",
+            }),
+            // Water alarm relay action
+            m.enumLookup<"namronPrivate04E0", NamronPrivate04E0>({
+                name: "water_alarm_relay_action",
+                lookup: {
+                    no_action: 0,
+                    turn_off_restore: 1,
+                    turn_on_restore: 2,
+                    turn_off_stay: 3,
+                    turn_on_stay: 4,
+                    no_water_turn_off: 5,
+                    no_water_turn_on: 6,
+                },
+                cluster: "namronPrivate04E0",
+                attribute: "waterAlarmRelayAction",
+                description: "Relay behavior when water sensor detects a leak",
+                entityCategory: "config",
+            }),
+            // NTC operation modes
+            m.enumLookup<"namronPrivate04E0", NamronPrivate04E0>({
+                name: "ntc1_operation_mode",
+                lookup: {no_action: 0, off_when_hot_on_when_cold: 1, on_when_hot_off_when_cold: 2, off_when_hot_stay: 3, on_when_hot_stay: 4},
+                cluster: "namronPrivate04E0",
+                attribute: "ntc1OperationSelect",
+                description: "Relay behavior based on NTC1 temperature threshold",
+                entityCategory: "config",
+            }),
+            m.enumLookup<"namronPrivate04E0", NamronPrivate04E0>({
+                name: "ntc2_operation_mode",
+                lookup: {no_action: 0, off_when_hot_on_when_cold: 1, on_when_hot_off_when_cold: 2, off_when_hot_stay: 3, on_when_hot_stay: 4},
+                cluster: "namronPrivate04E0",
+                attribute: "ntc2OperationSelect",
+                description: "Relay behavior based on NTC2 temperature threshold",
+                entityCategory: "config",
+            }),
+            // Temperature thresholds for relay auto control
+            m.numeric<"namronPrivate04E0", NamronPrivate04E0>({
+                name: "ntc1_relay_auto_temp",
+                cluster: "namronPrivate04E0",
+                attribute: "ntc1RelayAutoTemp",
+                description: "Temperature threshold for NTC1 relay control",
+                unit: "°C",
+                valueMin: 0,
+                valueMax: 100,
+                valueStep: 0.1,
+                scale: 10,
+                precision: 1,
+                entityCategory: "config",
+            }),
+            m.numeric<"namronPrivate04E0", NamronPrivate04E0>({
+                name: "ntc2_relay_auto_temp",
+                cluster: "namronPrivate04E0",
+                attribute: "ntc2RelayAutoTemp",
+                description: "Temperature threshold for NTC2 relay control",
+                unit: "°C",
+                valueMin: 0,
+                valueMax: 100,
+                valueStep: 0.1,
+                scale: 10,
+                precision: 1,
+                entityCategory: "config",
+            }),
+            // Override priority
+            m.enumLookup<"namronPrivate04E0", NamronPrivate04E0>({
+                name: "override_option",
+                lookup: {no_priority: 0, water_alarm_priority: 1, ntc_priority: 2},
+                cluster: "namronPrivate04E0",
+                attribute: "overrideOption",
+                description: "Priority when both water alarm and temperature conditions trigger",
+                entityCategory: "config",
+            }),
+            // Calibration offsets
+            m.numeric<"namronPrivate04E0", NamronPrivate04E0>({
+                name: "ntc1_calibration",
+                cluster: "namronPrivate04E0",
+                attribute: "ntcCalibration1",
+                description: "Temperature calibration offset for NTC1",
+                unit: "°C",
+                valueMin: -10,
+                valueMax: 10,
+                entityCategory: "config",
+            }),
+            m.numeric<"namronPrivate04E0", NamronPrivate04E0>({
+                name: "ntc2_calibration",
+                cluster: "namronPrivate04E0",
+                attribute: "ntcCalibration2",
+                description: "Temperature calibration offset for NTC2",
+                unit: "°C",
+                valueMin: -10,
+                valueMax: 10,
+                entityCategory: "config",
+            }),
+            // Hysteresis
+            m.numeric<"namronPrivate04E0", NamronPrivate04E0>({
+                name: "ntc1_temp_hysteresis",
+                cluster: "namronPrivate04E0",
+                attribute: "ntc1TempHysteresis",
+                description: "Temperature hysteresis for NTC1 relay control",
+                unit: "°C",
+                valueMin: -10,
+                valueMax: 10,
+                entityCategory: "config",
+            }),
+            m.numeric<"namronPrivate04E0", NamronPrivate04E0>({
+                name: "ntc2_temp_hysteresis",
+                cluster: "namronPrivate04E0",
+                attribute: "ntc2TempHysteresis",
+                description: "Temperature hysteresis for NTC2 relay control",
+                unit: "°C",
+                valueMin: -10,
+                valueMax: 10,
+                entityCategory: "config",
+            }),
+            // Condition alarms (read-only status)
+            m.binary<"namronPrivate04E0", NamronPrivate04E0>({
+                name: "water_condition_alarm",
+                cluster: "namronPrivate04E0",
+                attribute: "waterConditionAlarm",
+                description: "Water leak alarm active",
+                valueOn: [true, 1],
+                valueOff: [false, 0],
+                access: "STATE",
+            }),
+            m.binary<"namronPrivate04E0", NamronPrivate04E0>({
+                name: "ntc_condition_alarm",
+                cluster: "namronPrivate04E0",
+                attribute: "ntcConditionAlarm",
+                description: "NTC temperature alarm active",
+                valueOn: [true, 1],
+                valueOff: [false, 0],
+                access: "STATE",
+            }),
+            m.binary<"namronPrivate04E0", NamronPrivate04E0>({
+                name: "is_execute_condition",
+                cluster: "namronPrivate04E0",
+                attribute: "isExecuteCondition",
+                description: "Relay action triggered by conditions",
+                valueOn: [true, 1],
+                valueOff: [false, 0],
+                access: "STATE",
+            }),
+            // Polling (5 min interval)
+            m.poll({
+                key: "namron_4512785_poll",
+                optionKey: "temperature_poll_interval",
+                option: e
+                    .numeric("temperature_poll_interval", ea.SET)
+                    .withValueMin(-1)
+                    .withDescription("Polling interval for NTC temperature sensors (default: 300s, -1 to disable)"),
+                defaultIntervalSeconds: 300,
+                poll: async (device) => {
+                    const ep = device.getEndpoint(1);
+                    if (!ep) return;
+                    await ep.read("genOnOff", [0x0000]);
+                    await ep.read("msTemperatureMeasurement", [0x0000]);
+                    await ep.read(0x04e0, [0x0000, 0x0003, 0x000e, 0x000f, 0x0010]);
+                },
+            }),
         ],
     },
 ];

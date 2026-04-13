@@ -112,10 +112,10 @@ const tzLocal = {
                 const offWaitTime = meta.message.off_wait_time != null ? meta.message.off_wait_time : 0;
 
                 if (typeof onTime !== "number") {
-                    throw Error("The on_time value must be a number!");
+                    throw new Error("The on_time value must be a number!");
                 }
                 if (typeof offWaitTime !== "number") {
-                    throw Error("The off_wait_time value must be a number!");
+                    throw new Error("The off_wait_time value must be a number!");
                 }
 
                 const payload = {ctrlbits: 0, ontime: Math.round(onTime * 10), offwaittime: Math.round(offWaitTime * 10)};
@@ -369,7 +369,6 @@ export const definitions: DefinitionWithExtend[] = [
         vendor: "xyzroe",
         description: "Zigbee USB power monitor and switch",
         fromZigbee: [
-            fz.ignore_basic_report,
             fzLocal.zigusb_on_off_invert,
             fzLocal.zigusb_analog_input,
             fz.temperature,
@@ -417,15 +416,7 @@ export const definitions: DefinitionWithExtend[] = [
         model: "ZigDC",
         vendor: "xyzroe",
         description: "ZigDC",
-        fromZigbee: [
-            fz.ignore_basic_report,
-            fz.temperature,
-            fz.humidity,
-            fz.ptvo_multistate_action,
-            fzLocal.ZigDC_ina3221,
-            fzLocal.ZigDC_uptime,
-            fzLocal.ZigDC_input_config,
-        ],
+        fromZigbee: [fz.temperature, fz.humidity, fz.ptvo_multistate_action, fzLocal.ZigDC_ina3221, fzLocal.ZigDC_uptime, fzLocal.ZigDC_input_config],
         toZigbee: [tzLocal.ZigDC_interval, tzLocal.ZigDC_input_config],
         exposes: [
             e.current().withAccess(ea.STATE).withEndpoint("ch1"),
